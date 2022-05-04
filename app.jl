@@ -5,9 +5,16 @@ using NearestNeighbors
 using StaticArrays
 using Profile
 using ThreadsX
+using TimerOutputs
+using Distances
+using FLANN
 #using ProfileView
 
-n = 100*500
+# debug
+const to = TimerOutput()
+
+
+n = 100*500 # has to be divisible by threads
 vmax = 0.03
 d0 = 0.02
 dc = 0.01
@@ -17,13 +24,13 @@ l2 = 1.2
 l3 = 2
 l4 = 0.01
 
-struct Boid
+mutable struct Boid
     position::SVector{3, Float64}
     velocity::SVector{3, Float64}
 end
 
-norm(a1) = sqrt((a1[1])^2 + (a1[2])^2 + (a1[3])^2)
-distance(a1, a2) = sqrt((a1[1] - a2[1])^2 + (a1[2] - a2[2])^2 + (a1[3] - a2[3])^2)
+@inline norm(a1) = sqrt((a1[1])^2 + (a1[2])^2 + (a1[3])^2)
+@inline distance(a1, a2) = sqrt((a1[1] - a2[1])^2 + (a1[2] - a2[2])^2 + (a1[3] - a2[3])^2)
 init_boid()::Boid = Boid(1.0 .- 2 * rand(Float64,3), 0.001 .* rand(Float64,3))
 
 # update function
@@ -65,11 +72,11 @@ function update_boid(b, blist, nearby)
     end
 
     position = b.position + velocity
-    Boid(position, velocity)
+    Boid(position,velocity)
 end
 
 
-locations(boids::Vector{Boid}) = [x.position for x in boids]
+locations(boids) = reduce(hcat, [x.position for x in boids])
 
 # init
 boids = [init_boid() for _ in 1:n]
@@ -81,39 +88,63 @@ ax3d = Axis3(fig[1, 1]; aspect = (1, 1, 1),
 #hidedecorations!(ax3d)
 #hidespines!(ax3d)
 points = Observable([Point3f(x.position[1], x.position[2], x.position[3]) for x in boids])
+#velocities = Observable([Point3f(x.velocity[1], x.velocity[2], x.velocity[3]) for x in boids])
+#arrows!(ax3d,points,velocities,linewidth = 0.01, arrowsize = Vec3f(0.2, 0.2, 0.3)*0.1, linecolor=:gray60, arrowcolor=:gray30)
 scatter!(ax3d,points,markersize=10)
 display(fig)
 
 
-buffer = copy(boids)
 
-function update_sim() 
-    threads = 8
-    positions = [(i, x.position) for (i, x) in enumerate(boids)]
-    shape = reshape(positions, (threads, div(length(positions), threads)))
+# multithreading
+threads = 8
 
-    nearby = reduce(vcat, ThreadsX.map((i) -> hcat([x[1] for x in shape[i,:]] ,first(knn(kdtree, [x[2] for x in shape[i,:]], 25, true))),1:threads))
-
-    #nearby2 =  first(knn(kdtree, positions, 25, true))
-
-    Threads.@threads for i = 1:length(buffer)
-        index = nearby[i, 1]
-        data = nearby[i, 2]
-        buffer[index] = update_boid(boids[index], boids, data)
+# pre alloc buffer
+buffer = [Vector{Boid}(undef,n÷threads) for t in 1:threads]
+for t in 1:threads
+    @inbounds for i in eachindex(buffer[t])
+        buffer[t][i] = Boid(zeros(SVector{3}), zeros(SVector{3}))
     end
-    global boids = buffer
-    # updated indices
-    global kdtree = KDTree(locations(boids); leafsize = 10, reorder = true)
 end
 
- (for t in 1:2000
+
+function update_sim() 
+    @timeit to "begin" begin
+    positions = [(i, x.position) for (i, x) in enumerate(boids)]
+    shape = reshape(positions, (threads, div(length(positions), threads)))
+    end
+
+    @timeit to "locating" begin
+    nearby = ThreadsX.map((i) -> hcat([x[1] for x in shape[i,:]] ,first(knn(kdtree, [x[2] for x in shape[i,:]], 10, true))),1:threads)
+    end
+
+    @timeit to "process" begin
+        Threads.@threads for t = 1:threads
+            nb = nearby[t]
+            thread_buffer = buffer[t]
+            for i = 1:size(nb)[1]
+                index = nb[i, 1]
+                data = nb[i, 2]
+                thread_buffer[i] = update_boid(boids[index], boids, data)
+            end
+        end
+        global boids = reduce(vcat, buffer)
+    end
+
+    @timeit to "cleanup" begin
+    # updated indices
+    global kdtree = KDTree(locations(boids); leafsize = 10, reorder = false)
+    end
+end
+
+(for t in 1:2000
     println(t)
-    update_sim()
+    @timeit to "frame" update_sim()
     points[] = [Point3f(x.position[1], x.position[2], x.position[3]) for x in boids]
+    #velocities[] = [Point3f(x.velocity[1], x.velocity[2], x.velocity[3]) for x in boids]
     #sleep(0.0001)
 end)
 
-
+show(to)
 
 """record(fig, "append_animation.mp4", 1:30*20;
         framerate = 30) do frame
