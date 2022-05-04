@@ -4,6 +4,7 @@ using Base.Threads
 using NearestNeighbors
 using StaticArrays
 using Profile
+using ThreadsX
 #using ProfileView
 
 n = 100*500
@@ -26,9 +27,8 @@ distance(a1, a2) = sqrt((a1[1] - a2[1])^2 + (a1[2] - a2[2])^2 + (a1[3] - a2[3])^
 init_boid()::Boid = Boid(1.0 .- 2 * rand(Float64,3), 0.001 .* rand(Float64,3))
 
 # update function
-function update_boid(b, blist, tree)
-    nearby = first(knn(tree, b.position, 25))
-
+function update_boid(b, blist, nearby)
+    # nearby has to be sorted
     n_length = 0
     c_length = 0
 
@@ -46,6 +46,9 @@ function update_boid(b, blist, tree)
                 c_length += 1
             end
             n_length += 1
+        else
+            # we know that the list is sorted so, when the first element is not in sight the others are even further away
+            break
         end
     end
 
@@ -84,16 +87,26 @@ display(fig)
 
 buffer = copy(boids)
 
-function update_sim()
+function update_sim() 
+    threads = 8
+    positions = [(i, x.position) for (i, x) in enumerate(boids)]
+    shape = reshape(positions, (threads, div(length(positions), threads)))
+
+    nearby = reduce(vcat, ThreadsX.map((i) -> hcat([x[1] for x in shape[i,:]] ,first(knn(kdtree, [x[2] for x in shape[i,:]], 25, true))),1:threads))
+
+    #nearby2 =  first(knn(kdtree, positions, 25, true))
+
     Threads.@threads for i = 1:length(buffer)
-        buffer[i] = update_boid(buffer[i], boids, kdtree)
+        index = nearby[i, 1]
+        data = nearby[i, 2]
+        buffer[index] = update_boid(boids[index], boids, data)
     end
     global boids = buffer
     # updated indices
     global kdtree = KDTree(locations(boids); leafsize = 10, reorder = true)
 end
 
-(for t in 1:2000
+ (for t in 1:2000
     println(t)
     update_sim()
     points[] = [Point3f(x.position[1], x.position[2], x.position[3]) for x in boids]
