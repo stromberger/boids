@@ -6,9 +6,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-n = 100
+n = 100*200
 vmax = 0.03
-do = 0.02
+d0 = 0.0125
 dc = 0.01
 l0 = 0.31
 l1 = 0.001
